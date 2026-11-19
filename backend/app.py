@@ -71,6 +71,52 @@ def list_events():
         return db_error(exc)
 
 
+@app.post("/api/users")
+def find_or_create_user():
+    """Create or return an attendee record for a passwordless registration."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error="Request body must be a JSON object"), 400
+
+    email = payload.get("email")
+    if not isinstance(email, str):
+        return jsonify(error="A valid email address is required"), 400
+    email = email.strip().lower()
+    if len(email) > 320 or "@" not in email or email.startswith("@") or email.endswith("@"):
+        return jsonify(error="A valid email address is required"), 400
+
+    client, error = database()
+    if error:
+        return error
+    try:
+        found = (
+            client.table("users").select("id,email")
+            .eq("email", email).maybe_single().execute()
+        )
+        if found.data:
+            return jsonify(found.data), 200
+
+        created = (
+            client.table("users").insert({"email": email, "role": "attendee"})
+            .select("id,email").single().execute()
+        )
+        return jsonify(created.data), 201
+    except APIError as exc:
+        # A concurrent request may create the same email between lookup and
+        # insert. If email is unique in the database, return that user instead.
+        if getattr(exc, "code", None) == "23505":
+            try:
+                found = (
+                    client.table("users").select("id,email")
+                    .eq("email", email).maybe_single().execute()
+                )
+                if found.data:
+                    return jsonify(found.data), 200
+            except APIError:
+                pass
+        return db_error(exc)
+
+
 @app.get("/api/events/<event_id>")
 def get_event(event_id):
     event_id = valid_uuid(event_id)
@@ -110,7 +156,7 @@ def create_registration():
         event = event_result.data
         if not event:
             return jsonify(error="Event not found"), 404
-        if event.get("status", "").lower() not in ("open", "published", "active"):
+        if (event.get("status") or "").lower() not in ("open", "published", "active", "upcoming"):
             return jsonify(error="Event is not open for registration"), 409
 
         # The unique (user_id, event_id) constraint should also be present in
